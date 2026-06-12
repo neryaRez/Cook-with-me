@@ -1,0 +1,15 @@
+# The real backend.tf file is generated automatically by:
+#
+#   ./scripts/bootstrap-aws.sh
+#
+# Do not commit the generated backend.tf file.
+
+terraform {
+  backend "s3" {
+    bucket       = "cook-with-me-dev-tfstate-123456789012-us-east-1"
+    key          = "tfstate/cook-with-me/dev/terraform.tfstate"
+    region       = "us-east-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

@@ -80,3 +80,12 @@ Thumbs.db
 .idea/
 .vscode/
 merge_all.py
+# Terraform local/generated files
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+terraform/environments/*/backend.tf
+terraform/environments/*/terraform.tfvars
+output.txt

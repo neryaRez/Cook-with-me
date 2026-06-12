@@ -1,0 +1,10 @@
+project_name  = "cook-with-me"
+env_name      = "dev"
+aws_region    = "us-east-1"
+
+github_owner  = "OWNER"
+github_repo   = "REPOSITORY"
+github_branch = "main"
+
+# Optional:
+# github_oidc_provider_arn = "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
