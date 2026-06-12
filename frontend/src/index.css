@@ -1,0 +1,72 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap');
+@import 'tailwindcss';
+
+/*
+ * Light warm theme. Note: `--color-ink` is the page background (light cream)
+ * and `--color-cream` is the primary text color (dark warm brown) - the names
+ * are inherited from the original dark theme where the roles were reversed.
+ */
+@theme {
+  --color-ink: #fbf4ea;
+  --color-surface: #f6e9d8;
+  --color-card: #ffffff;
+  --color-card-hover: #fff2e1;
+  --color-border-subtle: #ecddc8;
+  --color-ember: #ed8254;
+  --color-ember-light: #d9622e;
+  --color-amber: #d9a441;
+  --color-cream: #3a2c22;
+  --color-muted: #7d6e5f;
+  --color-sage: #6b8e5a;
+  --color-sage-light: #e7efe1;
+
+  --font-display: 'Plus Jakarta Sans', 'Inter', sans-serif;
+  --font-sans: 'Inter', sans-serif;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background-color: var(--color-ink);
+  color: var(--color-cream);
+  font-family: var(--font-sans);
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--color-ink);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-subtle);
+  border-radius: 999px;
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
+
+.bg-noise {
+  background-image: radial-gradient(circle at 1px 1px, rgba(58, 44, 34, 0.05) 1px, transparent 0);
+  background-size: 24px 24px;
+}
+
+.text-gradient {
+  background-image: linear-gradient(90deg, var(--color-ember-light), var(--color-amber));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.scrollbar-none {
+  scrollbar-width: none;
+}
