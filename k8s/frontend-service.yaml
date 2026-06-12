@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cook-with-me-frontend
+  namespace: cook-with-me
+  labels:
+    app: cook-with-me-frontend
+spec:
+  type: LoadBalancer
+  selector:
+    app: cook-with-me-frontend
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
