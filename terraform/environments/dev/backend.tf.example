@@ -1,6 +1,6 @@
 # The real backend.tf file is generated automatically by:
 #
-#   ./scripts/bootstrap-aws.sh
+#   ./scripts/setup-foundation.sh
 #
 # Do not commit the generated backend.tf file.
 

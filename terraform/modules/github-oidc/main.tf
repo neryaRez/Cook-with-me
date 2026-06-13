@@ -5,7 +5,13 @@ data "tls_certificate" "github" {
 
 locals {
   name_prefix = "${var.project_name}-${var.env_name}"
-  repo_ref    = "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${var.github_branch}"
+
+  allowed_branch_patterns = length(var.github_branch_patterns) > 0 ? var.github_branch_patterns : [var.github_branch]
+
+  repo_refs = [
+    for branch_pattern in local.allowed_branch_patterns :
+    "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${branch_pattern}"
+  ]
 
   role_name         = "${local.name_prefix}-${var.role_name_suffix}"
   oidc_provider_arn = var.github_oidc_provider_arn != null ? var.github_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
@@ -45,7 +51,7 @@ resource "aws_iam_role" "github_actions" {
             "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
           }
           StringLike = {
-            "token.actions.githubusercontent.com:sub" = local.repo_ref
+            "token.actions.githubusercontent.com:sub" = local.repo_refs
           }
         }
       }

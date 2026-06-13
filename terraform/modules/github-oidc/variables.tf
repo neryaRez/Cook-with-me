@@ -43,3 +43,10 @@ variable "eks_cluster_arn" {
   type    = string
   default = null
 }
+
+
+variable "github_branch_patterns" {
+  type        = list(string)
+  description = "Allowed GitHub branch patterns for OIDC trust, for example: main, ci/*"
+  default     = []
+}

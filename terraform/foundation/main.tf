@@ -10,6 +10,11 @@ module "github_oidc_infra" {
 
   github_oidc_provider_arn = var.github_oidc_provider_arn
 
+
+  github_branch_patterns = [
+    var.github_branch,
+    "ci/*"
+  ]
   role_name_suffix            = "github-actions-infra-role"
   attach_administrator_policy = true
 }
