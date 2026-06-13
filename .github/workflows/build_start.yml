@@ -222,6 +222,44 @@ jobs:
           kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-backend --timeout=300s
           kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-frontend --timeout=300s
 
+      - name: Debug Kubernetes failure
+        if: failure()
+        run: |
+          set +e
+
+          echo "=== Kubernetes resources ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get all -o wide
+
+          echo
+          echo "=== Pods ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -o wide
+
+          echo
+          echo "=== Backend logs ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" logs deployment/cook-with-me-backend --all-containers=true --tail=150
+
+          echo
+          echo "=== Frontend logs ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" logs deployment/cook-with-me-frontend --all-containers=true --tail=150
+
+          echo
+          echo "=== Describe backend pods ==="
+          for pod in $(kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -l app=cook-with-me-backend -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- $pod ---"
+            kubectl -n "${{ vars.K8S_NAMESPACE }}" describe pod "$pod"
+          done
+
+          echo
+          echo "=== Describe frontend pods ==="
+          for pod in $(kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -l app=cook-with-me-frontend -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- $pod ---"
+            kubectl -n "${{ vars.K8S_NAMESPACE }}" describe pod "$pod"
+          done
+
+          echo
+          echo "=== Recent namespace events ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get events --sort-by='.lastTimestamp' | tail -80
+          
       - name: Print Kubernetes resources
         if: always()
         run: |
