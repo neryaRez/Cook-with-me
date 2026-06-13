@@ -1,0 +1,97 @@
+name: Build Start - Provision Infrastructure
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - "ci/**"
+    paths:
+      - "terraform/**"
+      - ".github/workflows/build_start.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_ENV_DIR: terraform/environments/dev
+
+jobs:
+  provision-infrastructure:
+    name: Provision AWS Infrastructure
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials with OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_INFRA_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Generate Terraform backend and tfvars
+        working-directory: ${{ env.TF_ENV_DIR }}
+        run: |
+          set -euo pipefail
+
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+
+          cat > backend.tf <<EOF_BACKEND
+          terraform {
+            backend "s3" {
+              bucket       = "${{ vars.TF_STATE_BUCKET }}"
+              key          = "${{ vars.TF_STATE_KEY }}"
+              region       = "${{ vars.AWS_REGION }}"
+              encrypt      = true
+              use_lockfile = true
+            }
+          }
+          EOF_BACKEND
+
+          cat > terraform.tfvars <<EOF_TFVARS
+          project_name = "${{ vars.PROJECT_NAME }}"
+          env_name     = "${{ vars.ENV_NAME }}"
+          aws_region   = "${{ vars.AWS_REGION }}"
+
+          github_owner  = "${{ github.repository_owner }}"
+          github_repo   = "$REPO_NAME"
+          github_branch = "${{ github.ref_name }}"
+
+          github_actions_infra_role_arn = "${{ vars.AWS_INFRA_ROLE_ARN }}"
+          EOF_TFVARS
+
+          echo "Generated backend.tf and terraform.tfvars"
+          echo
+          echo "terraform.tfvars preview:"
+          grep -E 'project_name|env_name|aws_region|github_owner|github_repo|github_branch|github_actions_infra_role_arn' terraform.tfvars
+
+      - name: Terraform fmt check
+        run: terraform -chdir=${{ env.TF_ENV_DIR }} fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform -chdir=${{ env.TF_ENV_DIR }} init -reconfigure
+
+      - name: Terraform validate
+        run: terraform -chdir=${{ env.TF_ENV_DIR }} validate
+
+      - name: Terraform plan
+        run: terraform -chdir=${{ env.TF_ENV_DIR }} plan -out=tfplan
+
+      - name: Terraform apply
+        run: terraform -chdir=${{ env.TF_ENV_DIR }} apply -auto-approve tfplan
+
+      - name: Print Terraform outputs
+        run: |
+          terraform -chdir=${{ env.TF_ENV_DIR }} output
