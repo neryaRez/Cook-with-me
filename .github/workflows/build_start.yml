@@ -202,6 +202,9 @@ jobs:
           export BACKEND_IMAGE="$BACKEND_IMAGE"
           export FRONTEND_IMAGE="$FRONTEND_IMAGE"
 
+          envsubst < k8s/namespace.yaml | kubectl apply -f -
+          envsubst < k8s/backend-service.yaml | kubectl apply -f -
+          envsubst < k8s/frontend-service.yaml | kubectl apply -f -
           envsubst < k8s/backend-deployment.yaml | kubectl apply -f -
           envsubst < k8s/frontend-deployment.yaml | kubectl apply -f -
 
