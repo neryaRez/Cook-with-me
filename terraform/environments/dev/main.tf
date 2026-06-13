@@ -43,7 +43,7 @@ module "storage" {
 
 resource "aws_eks_access_entry" "github_actions" {
   cluster_name  = module.eks.cluster_name
-  principal_arn = module.github_oidc.github_actions_role_arn
+  principal_arn = var.github_actions_infra_role_arn
   type          = "STANDARD"
 
   depends_on = [module.eks]
