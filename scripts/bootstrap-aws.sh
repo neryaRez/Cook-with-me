@@ -13,9 +13,10 @@ ENV_FILE="${ENV_FILE:-backend/.env.local}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TF_ENV_DIR="$ROOT_DIR/terraform/environments/$ENV_NAME"
-BACKEND_FILE="$TF_ENV_DIR/backend.tf"
-TFVARS_FILE="$TF_ENV_DIR/terraform.tfvars"
+
+TF_BOOTSTRAP_DIR="$ROOT_DIR/terraform/bootstrap"
+BOOTSTRAP_BACKEND_FILE="$TF_BOOTSTRAP_DIR/backend.tf"
+BOOTSTRAP_TFVARS_FILE="$TF_BOOTSTRAP_DIR/terraform.tfvars"
 
 APT_UPDATED="false"
 
@@ -80,18 +81,25 @@ install_tools() {
     sudo apt-get install -y terraform
   fi
 
-  if ! has kubectl; then
-    info "Installing kubectl..."
-    tmp="$(mktemp)"
-    curl -fsSL "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" -o "$tmp"
-    chmod +x "$tmp"
-    sudo mv "$tmp" /usr/local/bin/kubectl
+  if ! has gh; then
+    info "Installing GitHub CLI..."
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg >/dev/null
+
+    sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      | sudo tee /etc/apt/sources.list.d/github-cli.list >/dev/null
+
+    sudo apt-get update -y
+    sudo apt-get install -y gh
   fi
 
   has aws || fail "aws is missing"
   has terraform || fail "terraform is missing"
-  has kubectl || fail "kubectl is missing"
+  has gh || fail "gh is missing"
   has jq || fail "jq is missing"
+  has git || fail "git is missing"
 
   ok "Tools are ready"
 }
@@ -110,8 +118,51 @@ detect_existing_github_oidc_provider_arn() {
     | head -n 1 || true
 }
 
+ensure_gh_auth() {
+  section "Validating GitHub CLI auth"
+
+  if gh auth status >/dev/null 2>&1; then
+    ok "GitHub CLI is authenticated"
+    return
+  fi
+
+  warn "GitHub CLI is not authenticated."
+  echo
+  echo "Run this command, authenticate, then rerun bootstrap:"
+  echo
+  echo "  gh auth login"
+  echo
+  fail "GitHub CLI authentication is required to upload repo variables."
+}
+
+validate_github_api() {
+  section "Validating GitHub API access"
+
+  local max_attempts=5
+  local attempt=1
+  local sleep_seconds=3
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if gh api "repos/$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+      ok "GitHub API access is working"
+      return 0
+    fi
+
+    warn "GitHub API check failed attempt $attempt/$max_attempts"
+
+    if [ "$attempt" -eq "$max_attempts" ]; then
+      fail "GitHub API is not reachable or repo access is missing."
+    fi
+
+    sleep "$sleep_seconds"
+    attempt=$((attempt + 1))
+    sleep_seconds=$((sleep_seconds * 2))
+  done
+}
+
 write_local_env_file() {
   mkdir -p "$ROOT_DIR/backend"
+
   cat > "$ROOT_DIR/$ENV_FILE" <<ENV
 OPENAI_API_KEY='$OPENAI_API_KEY'
 DATABASE_URL='$DATABASE_URL'
@@ -129,11 +180,12 @@ sync_app_secrets() {
     # shellcheck disable=SC1090
     source "$ROOT_DIR/$ENV_FILE"
     set +a
+
     existing_openai="${OPENAI_API_KEY:-}"
     existing_db="${DATABASE_URL:-}"
   fi
 
-  echo "Enter runtime secrets for this runner."
+  echo "Enter runtime secrets."
   echo "If a local value already exists, pressing Enter keeps it."
   echo
 
@@ -142,20 +194,22 @@ sync_app_secrets() {
   else
     info "No local OPENAI_API_KEY found. You must paste one."
   fi
-  read -rsp "OPENAI_API_KEY: " input_openai; echo
+  read -rsp "OPENAI_API_KEY: " input_openai
+  echo
 
   if [ -n "$existing_db" ]; then
     info "Existing local DATABASE_URL found. Press Enter to keep it, or paste a new one."
   else
     info "No local DATABASE_URL found. You must paste one."
   fi
-  read -rsp "DATABASE_URL: " input_db; echo
+  read -rsp "DATABASE_URL: " input_db
+  echo
 
   OPENAI_API_KEY="${input_openai:-$existing_openai}"
   DATABASE_URL="${input_db:-$existing_db}"
 
-  [ -n "${OPENAI_API_KEY:-}" ] || fail "OPENAI_API_KEY is empty. Paste a value or create $ENV_FILE first."
-  [ -n "${DATABASE_URL:-}" ] || fail "DATABASE_URL is empty. Paste a value or create $ENV_FILE first."
+  [ -n "${OPENAI_API_KEY:-}" ] || fail "OPENAI_API_KEY is empty."
+  [ -n "${DATABASE_URL:-}" ] || fail "DATABASE_URL is empty."
 
   if [[ "$DATABASE_URL" == mysql://* ]]; then
     info "Normalizing DATABASE_URL to mysql+pymysql://"
@@ -164,12 +218,16 @@ sync_app_secrets() {
 
   write_local_env_file
 
+  local secret_json
   secret_json="$(jq -n \
     --arg openai "$OPENAI_API_KEY" \
     --arg db "$DATABASE_URL" \
     '{OPENAI_API_KEY:$openai,DATABASE_URL:$db}')"
 
-  if aws secretsmanager describe-secret --secret-id "$SECRET_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+  if aws secretsmanager describe-secret \
+    --secret-id "$SECRET_NAME" \
+    --region "$AWS_REGION" >/dev/null 2>&1; then
+
     aws secretsmanager put-secret-value \
       --secret-id "$SECRET_NAME" \
       --secret-string "$secret_json" \
@@ -177,7 +235,7 @@ sync_app_secrets() {
   else
     aws secretsmanager create-secret \
       --name "$SECRET_NAME" \
-      --description "Cook With Me backend secrets for $ENV_NAME" \
+      --description "Cook With Me backend runtime secrets for $ENV_NAME" \
       --secret-string "$secret_json" \
       --region "$AWS_REGION" >/dev/null
   fi
@@ -185,7 +243,12 @@ sync_app_secrets() {
   ok "Secrets synced to AWS Secrets Manager: $SECRET_NAME"
 
   info "Secret verification without printing secret values:"
-  aws secretsmanager get-secret-value     --secret-id "$SECRET_NAME"     --region "$AWS_REGION"     --query SecretString     --output text     | jq '{
+  aws secretsmanager get-secret-value \
+    --secret-id "$SECRET_NAME" \
+    --region "$AWS_REGION" \
+    --query SecretString \
+    --output text \
+    | jq '{
         has_OPENAI_API_KEY: (.OPENAI_API_KEY | type == "string" and length > 0),
         has_DATABASE_URL: (.DATABASE_URL | type == "string" and length > 0),
         openai_key_length: (.OPENAI_API_KEY | length),
@@ -193,66 +256,56 @@ sync_app_secrets() {
       }'
 }
 
-prepare_terraform_backend() {
-  section "Preparing Terraform backend"
+prepare_terraform_backend_bucket() {
+  section "Preparing Terraform backend bucket"
 
   local project_clean env_clean
   project_clean="$(clean_name "$PROJECT_NAME")"
   env_clean="$(clean_name "$ENV_NAME")"
 
-  STATE_BUCKET="${project_clean}-${env_clean}-tfstate-${ACCOUNT_ID}-${AWS_REGION}"
-  STATE_KEY="tfstate/${project_clean}/${env_clean}/terraform.tfstate"
+  TF_STATE_BUCKET="${project_clean}-${env_clean}-tfstate-${ACCOUNT_ID}-${AWS_REGION}"
+  TF_STATE_KEY="tfstate/${project_clean}/${env_clean}/terraform.tfstate"
+  TF_BOOTSTRAP_STATE_KEY="tfstate/${project_clean}/${env_clean}/bootstrap.tfstate"
 
-  if ! aws s3api head-bucket --bucket "$STATE_BUCKET" 2>/dev/null; then
-    info "Creating tfstate bucket: $STATE_BUCKET"
+  if ! aws s3api head-bucket --bucket "$TF_STATE_BUCKET" 2>/dev/null; then
+    info "Creating tfstate bucket: $TF_STATE_BUCKET"
 
     if [ "$AWS_REGION" = "us-east-1" ]; then
-      aws s3api create-bucket --bucket "$STATE_BUCKET" --region "$AWS_REGION" >/dev/null
+      aws s3api create-bucket \
+        --bucket "$TF_STATE_BUCKET" \
+        --region "$AWS_REGION" >/dev/null
     else
       aws s3api create-bucket \
-        --bucket "$STATE_BUCKET" \
+        --bucket "$TF_STATE_BUCKET" \
         --region "$AWS_REGION" \
         --create-bucket-configuration LocationConstraint="$AWS_REGION" >/dev/null
     fi
   fi
 
   aws s3api put-public-access-block \
-    --bucket "$STATE_BUCKET" \
+    --bucket "$TF_STATE_BUCKET" \
     --public-access-block-configuration \
     BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null
 
   aws s3api put-bucket-versioning \
-    --bucket "$STATE_BUCKET" \
+    --bucket "$TF_STATE_BUCKET" \
     --versioning-configuration Status=Enabled >/dev/null
 
   aws s3api put-bucket-encryption \
-    --bucket "$STATE_BUCKET" \
+    --bucket "$TF_STATE_BUCKET" \
     --server-side-encryption-configuration \
     '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' >/dev/null
 
-
-  mkdir -p "$TF_ENV_DIR"
-
-  cat > "$BACKEND_FILE" <<TF
-terraform {
-  backend "s3" {
-    bucket         = "$STATE_BUCKET"
-    key            = "$STATE_KEY"
-    region         = "$AWS_REGION"
-    encrypt      = true
-    use_lockfile = true
-  }
-}
-TF
-
-  ok "Terraform backend ready"
+  ok "Terraform backend bucket ready"
 }
 
-write_tfvars() {
-  section "Generating terraform.tfvars"
+write_bootstrap_terraform_files() {
+  section "Generating bootstrap Terraform files"
 
-  github_owner="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f1)"
-  github_repo="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f2)"
+  mkdir -p "$TF_BOOTSTRAP_DIR"
+
+  GITHUB_OWNER="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f1)"
+  GITHUB_REPO="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f2)"
 
   GITHUB_OIDC_PROVIDER_ARN="${GITHUB_OIDC_PROVIDER_ARN:-$(detect_existing_github_oidc_provider_arn)}"
 
@@ -261,86 +314,117 @@ write_tfvars() {
     info "$GITHUB_OIDC_PROVIDER_ARN"
     github_oidc_value="\"$GITHUB_OIDC_PROVIDER_ARN\""
   else
-    info "No existing GitHub OIDC provider detected. Terraform will create one."
+    info "No existing GitHub OIDC provider detected. terraform/bootstrap will create one."
     github_oidc_value="null"
   fi
 
-  cat > "$TFVARS_FILE" <<TFVARS
+  cat > "$BOOTSTRAP_BACKEND_FILE" <<TF
+terraform {
+  backend "s3" {
+    bucket       = "$TF_STATE_BUCKET"
+    key          = "$TF_BOOTSTRAP_STATE_KEY"
+    region       = "$AWS_REGION"
+    encrypt      = true
+    use_lockfile = true
+  }
+}
+TF
+
+  cat > "$BOOTSTRAP_TFVARS_FILE" <<TFVARS
 project_name  = "$PROJECT_NAME"
 env_name      = "$ENV_NAME"
 aws_region    = "$AWS_REGION"
 
-github_owner  = "$github_owner"
-github_repo   = "$github_repo"
+github_owner  = "$GITHUB_OWNER"
+github_repo   = "$GITHUB_REPO"
 github_branch = "$GITHUB_BRANCH"
 
 github_oidc_provider_arn = $github_oidc_value
 TFVARS
 
-  ok "terraform.tfvars generated"
+  ok "bootstrap backend.tf and terraform.tfvars generated"
 }
 
-run_terraform() {
-  section "Running Terraform"
+run_bootstrap_terraform() {
+  section "Applying terraform/bootstrap"
 
-  cd "$TF_ENV_DIR"
+  [ -f "$TF_BOOTSTRAP_DIR/main.tf" ] || fail "Missing $TF_BOOTSTRAP_DIR/main.tf"
+  [ -f "$TF_BOOTSTRAP_DIR/variables.tf" ] || fail "Missing $TF_BOOTSTRAP_DIR/variables.tf"
+  [ -f "$TF_BOOTSTRAP_DIR/outputs.tf" ] || fail "Missing $TF_BOOTSTRAP_DIR/outputs.tf"
 
-  terraform init -reconfigure
-  terraform fmt -recursive "$ROOT_DIR/terraform"
-  terraform validate
+  terraform -chdir="$TF_BOOTSTRAP_DIR" init -reconfigure
+  terraform -chdir="$TF_BOOTSTRAP_DIR" fmt -recursive
+  terraform -chdir="$TF_BOOTSTRAP_DIR" validate
 
   if [ "$AUTO_APPROVE" = "true" ]; then
-    terraform apply -auto-approve
+    terraform -chdir="$TF_BOOTSTRAP_DIR" apply -auto-approve
   else
-    terraform plan -out=tfplan
-    terraform apply tfplan
+    terraform -chdir="$TF_BOOTSTRAP_DIR" plan -out=tfplan
+    terraform -chdir="$TF_BOOTSTRAP_DIR" apply tfplan
   fi
 
-  EKS_CLUSTER_NAME="$(terraform output -raw eks_cluster_name)"
-  BACKEND_ECR_URL="$(terraform output -json ecr_repository_urls | jq -r '.backend')"
-  FRONTEND_ECR_URL="$(terraform output -json ecr_repository_urls | jq -r '.frontend')"
-  GITHUB_ACTIONS_ROLE_ARN="$(terraform output -raw github_actions_role_arn 2>/dev/null || true)"
+  AWS_INFRA_ROLE_ARN="$(
+    terraform -chdir="$TF_BOOTSTRAP_DIR" output -raw github_actions_infra_role_arn
+  )"
 
-  ok "Terraform completed"
+  GITHUB_OIDC_PROVIDER_ARN="$(
+    terraform -chdir="$TF_BOOTSTRAP_DIR" output -raw github_oidc_provider_arn
+  )"
+
+  ok "terraform/bootstrap applied"
+  info "GitHub Actions infra role: $AWS_INFRA_ROLE_ARN"
 }
 
-update_kubeconfig() {
-  section "Updating kubeconfig"
+set_github_variable() {
+  local name="$1"
+  local value="$2"
+  local max_attempts=5
+  local attempt=1
+  local sleep_seconds=3
 
-  aws eks update-kubeconfig \
-    --name "$EKS_CLUSTER_NAME" \
-    --region "$AWS_REGION"
+  while [ "$attempt" -le "$max_attempts" ]; do
+    if gh variable set "$name" \
+      --repo "$GITHUB_REPOSITORY" \
+      --body "$value" >/dev/null; then
 
-  ok "kubeconfig updated"
+      ok "GitHub variable set: $name"
+      return 0
+    fi
+
+    warn "Failed to set GitHub variable: $name attempt $attempt/$max_attempts"
+
+    if [ "$attempt" -eq "$max_attempts" ]; then
+      fail "Could not set GitHub variable after $max_attempts attempts: $name"
+    fi
+
+    sleep "$sleep_seconds"
+    attempt=$((attempt + 1))
+    sleep_seconds=$((sleep_seconds * 2))
+  done
 }
 
-create_kubernetes_secret() {
-  section "Creating Kubernetes Secret"
+upload_github_variables() {
+  section "Uploading GitHub Actions variables"
 
-  kubectl get ns "$K8S_NAMESPACE" >/dev/null 2>&1 || kubectl create ns "$K8S_NAMESPACE"
+  set_github_variable "AWS_REGION" "$AWS_REGION"
+  set_github_variable "AWS_INFRA_ROLE_ARN" "$AWS_INFRA_ROLE_ARN"
 
-  secret_string="$(aws secretsmanager get-secret-value \
-    --secret-id "$SECRET_NAME" \
-    --region "$AWS_REGION" \
-    --query SecretString \
-    --output text)"
+  set_github_variable "TF_STATE_BUCKET" "$TF_STATE_BUCKET"
+  set_github_variable "TF_STATE_KEY" "$TF_STATE_KEY"
+  set_github_variable "TF_BOOTSTRAP_STATE_KEY" "$TF_BOOTSTRAP_STATE_KEY"
 
-  openai_value="$(echo "$secret_string" | jq -r '.OPENAI_API_KEY')"
-  db_value="$(echo "$secret_string" | jq -r '.DATABASE_URL')"
+  set_github_variable "PROJECT_NAME" "$PROJECT_NAME"
+  set_github_variable "ENV_NAME" "$ENV_NAME"
 
-  [ -n "$openai_value" ] && [ "$openai_value" != "null" ] || fail "OPENAI_API_KEY missing in secret"
-  [ -n "$db_value" ] && [ "$db_value" != "null" ] || fail "DATABASE_URL missing in secret"
+  set_github_variable "SECRET_NAME" "$SECRET_NAME"
+  set_github_variable "K8S_NAMESPACE" "$K8S_NAMESPACE"
+  set_github_variable "K8S_SECRET_NAME" "$K8S_SECRET_NAME"
 
-  kubectl -n "$K8S_NAMESPACE" create secret generic "$K8S_SECRET_NAME" \
-    --from-literal=OPENAI_API_KEY="$openai_value" \
-    --from-literal=DATABASE_URL="$db_value" \
-    --dry-run=client -o yaml | kubectl apply -f -
-
-  ok "Kubernetes Secret ready: $K8S_SECRET_NAME"
+  ok "GitHub Actions variables uploaded"
 }
 
 print_summary() {
-  section "Bootstrap completed"
+  section "Foundation bootstrap completed"
 
   echo "Project:              $PROJECT_NAME"
   echo "Environment:          $ENV_NAME"
@@ -350,32 +434,28 @@ print_summary() {
   echo "GitHub Branch:        $GITHUB_BRANCH"
   echo
   echo "Terraform Backend:"
-  echo "  S3 Bucket:          $STATE_BUCKET"
+  echo "  S3 Bucket:          $TF_STATE_BUCKET"
+  echo "  App State Key:      $TF_STATE_KEY"
+  echo "  Bootstrap State Key:$TF_BOOTSTRAP_STATE_KEY"
   echo "  S3 Lockfile:        enabled"
   echo
-  echo "AWS Resources:"
-  echo "  EKS Cluster:        $EKS_CLUSTER_NAME"
-  echo "  Backend ECR:        $BACKEND_ECR_URL"
-  echo "  Frontend ECR:       $FRONTEND_ECR_URL"
+  echo "Secrets:"
   echo "  Secrets Manager:    $SECRET_NAME"
   echo
-  echo "Kubernetes:"
+  echo "GitHub OIDC:"
+  echo "  Provider ARN:       $GITHUB_OIDC_PROVIDER_ARN"
+  echo "  Infra Role ARN:     $AWS_INFRA_ROLE_ARN"
+  echo
+  echo "Kubernetes conventions:"
   echo "  Namespace:          $K8S_NAMESPACE"
   echo "  Secret:             $K8S_SECRET_NAME"
-
-  if [ -n "${GITHUB_ACTIONS_ROLE_ARN:-}" ]; then
-    echo
-    echo "GitHub Actions:"
-    echo "  OIDC Role ARN:      $GITHUB_ACTIONS_ROLE_ARN"
-  fi
-
   echo
   echo "Next step:"
-  echo "  GitHub Actions should build/push Docker images and deploy k8s manifests."
+  echo "  Run GitHub Actions workflow: build_start.yml"
 }
 
 main() {
-  section "Cook With Me AWS Bootstrap"
+  section "Cook With Me Foundation Bootstrap"
 
   cd "$ROOT_DIR"
   info "Project root: $ROOT_DIR"
@@ -404,12 +484,13 @@ main() {
   ok "GitHub repo: $GITHUB_REPOSITORY"
   info "GitHub branch: $GITHUB_BRANCH"
 
+  ensure_gh_auth
+  validate_github_api
   sync_app_secrets
-  prepare_terraform_backend
-  write_tfvars
-  run_terraform
-  update_kubeconfig
-  create_kubernetes_secret
+  prepare_terraform_backend_bucket
+  write_bootstrap_terraform_files
+  run_bootstrap_terraform
+  upload_github_variables
   print_summary
 
   echo

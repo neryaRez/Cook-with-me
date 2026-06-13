@@ -32,8 +32,7 @@ variable "github_branch" {
   default     = "main"
 }
 
-variable "github_oidc_provider_arn" {
-  description = "Existing GitHub OIDC provider ARN. Null means Terraform will create one."
+variable "github_actions_infra_role_arn" {
   type        = string
-  default     = null
+  description = "GitHub Actions infra role ARN created by terraform/bootstrap"
 }

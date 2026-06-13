@@ -40,21 +40,6 @@ module "storage" {
   aws_region   = var.aws_region
 }
 
-module "github_oidc" {
-  source = "../../modules/github-oidc"
-
-  project_name = var.project_name
-  env_name     = var.env_name
-
-  github_owner  = var.github_owner
-  github_repo   = var.github_repo
-  github_branch = var.github_branch
-
-  github_oidc_provider_arn = var.github_oidc_provider_arn
-
-  ecr_repository_arns = module.ecr.repository_arns
-  eks_cluster_arn     = module.eks.cluster_arn
-}
 
 resource "aws_eks_access_entry" "github_actions" {
   cluster_name  = module.eks.cluster_name
@@ -66,7 +51,7 @@ resource "aws_eks_access_entry" "github_actions" {
 
 resource "aws_eks_access_policy_association" "github_actions_admin" {
   cluster_name  = module.eks.cluster_name
-  principal_arn = module.github_oidc.github_actions_role_arn
+  principal_arn = var.github_actions_infra_role_arn
   policy_arn    = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
 
   access_scope {

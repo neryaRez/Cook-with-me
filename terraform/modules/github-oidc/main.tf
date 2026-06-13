@@ -7,7 +7,11 @@ locals {
   name_prefix = "${var.project_name}-${var.env_name}"
   repo_ref    = "repo:${var.github_owner}/${var.github_repo}:ref:refs/heads/${var.github_branch}"
 
+  role_name         = "${local.name_prefix}-${var.role_name_suffix}"
   oidc_provider_arn = var.github_oidc_provider_arn != null ? var.github_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
+
+  ecr_resources = length(var.ecr_repository_arns) > 0 ? var.ecr_repository_arns : ["*"]
+  eks_resource  = var.eks_cluster_arn != null ? var.eks_cluster_arn : "*"
 }
 
 resource "aws_iam_openid_connect_provider" "github" {
@@ -25,7 +29,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 }
 
 resource "aws_iam_role" "github_actions" {
-  name = "${local.name_prefix}-github-actions-role"
+  name = local.role_name
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -49,8 +53,10 @@ resource "aws_iam_role" "github_actions" {
   })
 }
 
-resource "aws_iam_policy" "github_actions" {
-  name = "${local.name_prefix}-github-actions-policy"
+resource "aws_iam_policy" "github_actions_deploy" {
+  count = var.attach_administrator_policy ? 0 : 1
+
+  name = "${local.role_name}-policy"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -76,19 +82,37 @@ resource "aws_iam_policy" "github_actions" {
           "ecr:PutImage",
           "ecr:UploadLayerPart"
         ]
-        Resource = var.ecr_repository_arns
+        Resource = local.ecr_resources
       },
       {
         Sid      = "EksDescribe"
         Effect   = "Allow"
         Action   = ["eks:DescribeCluster"]
-        Resource = var.eks_cluster_arn
+        Resource = local.eks_resource
+      },
+      {
+        Sid    = "SecretsManagerRead"
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:DescribeSecret",
+          "secretsmanager:GetSecretValue"
+        ]
+        Resource = "*"
       }
     ]
   })
 }
 
-resource "aws_iam_role_policy_attachment" "github_actions" {
+resource "aws_iam_role_policy_attachment" "github_actions_deploy" {
+  count = var.attach_administrator_policy ? 0 : 1
+
   role       = aws_iam_role.github_actions.name
-  policy_arn = aws_iam_policy.github_actions.arn
+  policy_arn = aws_iam_policy.github_actions_deploy[0].arn
+}
+
+resource "aws_iam_role_policy_attachment" "github_actions_admin" {
+  count = var.attach_administrator_policy ? 1 : 0
+
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
