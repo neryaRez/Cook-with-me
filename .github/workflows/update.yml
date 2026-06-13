@@ -1,4 +1,4 @@
-name: Build Start - Provision and First Deploy
+name: Update - Smart Build and Deploy
 
 on:
   workflow_dispatch:
@@ -7,31 +7,48 @@ on:
       - main
       - "ci/**"
     paths:
-      - "terraform/**"
       - "backend/**"
       - "frontend/**"
       - "k8s/**"
-      - ".github/workflows/build_start.yml"
+      - ".github/workflows/update.yml"
 
 permissions:
   id-token: write
   contents: read
 
 concurrency:
-  group: build-start-${{ github.ref }}
-  cancel-in-progress: false
+  group: update-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   TF_ENV_DIR: terraform/environments/dev
 
 jobs:
-  provision-and-first-deploy:
-    name: Provision Infrastructure and Deploy App
+  update-app:
+    name: Smart Build, Push and Deploy
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Detect changed areas
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+            k8s:
+              - 'k8s/**'
+
+      - name: Print detected changes
+        run: |
+          echo "backend changed:  ${{ steps.changes.outputs.backend }}"
+          echo "frontend changed: ${{ steps.changes.outputs.frontend }}"
+          echo "k8s changed:      ${{ steps.changes.outputs.k8s }}"
 
       - name: Configure AWS credentials with OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -78,20 +95,8 @@ jobs:
           github_actions_infra_role_arn = "${{ vars.AWS_INFRA_ROLE_ARN }}"
           EOF_TFVARS
 
-      - name: Terraform fmt check
-        run: terraform -chdir=${{ env.TF_ENV_DIR }} fmt -check -recursive
-
       - name: Terraform init
         run: terraform -chdir=${{ env.TF_ENV_DIR }} init -reconfigure
-
-      - name: Terraform validate
-        run: terraform -chdir=${{ env.TF_ENV_DIR }} validate
-
-      - name: Terraform plan
-        run: terraform -chdir=${{ env.TF_ENV_DIR }} plan -out=tfplan
-
-      - name: Terraform apply
-        run: terraform -chdir=${{ env.TF_ENV_DIR }} apply -auto-approve tfplan
 
       - name: Read Terraform outputs
         id: tfout
@@ -106,46 +111,8 @@ jobs:
           echo "backend_ecr_url=$BACKEND_ECR_URL" >> "$GITHUB_OUTPUT"
           echo "frontend_ecr_url=$FRONTEND_ECR_URL" >> "$GITHUB_OUTPUT"
 
-          echo "EKS cluster: $EKS_CLUSTER_NAME"
-          echo "Backend ECR: $BACKEND_ECR_URL"
-          echo "Frontend ECR: $FRONTEND_ECR_URL"
-
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build and push backend image
-        run: |
-          set -euo pipefail
-
-          BACKEND_IMAGE="${{ steps.tfout.outputs.backend_ecr_url }}:${GITHUB_SHA}"
-          BACKEND_LATEST="${{ steps.tfout.outputs.backend_ecr_url }}:latest"
-
-          docker build \
-            -t "$BACKEND_IMAGE" \
-            -t "$BACKEND_LATEST" \
-            ./backend
-
-          docker push "$BACKEND_IMAGE"
-          docker push "$BACKEND_LATEST"
-
-          echo "BACKEND_IMAGE=$BACKEND_IMAGE" >> "$GITHUB_ENV"
-
-      - name: Build and push frontend image
-        run: |
-          set -euo pipefail
-
-          FRONTEND_IMAGE="${{ steps.tfout.outputs.frontend_ecr_url }}:${GITHUB_SHA}"
-          FRONTEND_LATEST="${{ steps.tfout.outputs.frontend_ecr_url }}:latest"
-
-          docker build \
-            -t "$FRONTEND_IMAGE" \
-            -t "$FRONTEND_LATEST" \
-            ./frontend
-
-          docker push "$FRONTEND_IMAGE"
-          docker push "$FRONTEND_LATEST"
-
-          echo "FRONTEND_IMAGE=$FRONTEND_IMAGE" >> "$GITHUB_ENV"
 
       - name: Setup kubectl
         uses: azure/setup-kubectl@v4
@@ -158,7 +125,6 @@ jobs:
             --name "${{ steps.tfout.outputs.eks_cluster_name }}" \
             --region "${{ vars.AWS_REGION }}"
 
-          kubectl version --client
           kubectl get nodes
 
       - name: Ensure namespace exists
@@ -188,52 +154,118 @@ jobs:
             --dry-run=client \
             -o yaml | kubectl apply -f -
 
+      - name: Resolve currently deployed images
+        run: |
+          set -euo pipefail
+
+          BACKEND_DEFAULT_IMAGE="${{ steps.tfout.outputs.backend_ecr_url }}:latest"
+          FRONTEND_DEFAULT_IMAGE="${{ steps.tfout.outputs.frontend_ecr_url }}:latest"
+
+          BACKEND_CURRENT_IMAGE="$(kubectl -n "${{ vars.K8S_NAMESPACE }}" get deployment cook-with-me-backend -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+          FRONTEND_CURRENT_IMAGE="$(kubectl -n "${{ vars.K8S_NAMESPACE }}" get deployment cook-with-me-frontend -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null || true)"
+
+          if [ -z "$BACKEND_CURRENT_IMAGE" ]; then
+            BACKEND_CURRENT_IMAGE="$BACKEND_DEFAULT_IMAGE"
+          fi
+
+          if [ -z "$FRONTEND_CURRENT_IMAGE" ]; then
+            FRONTEND_CURRENT_IMAGE="$FRONTEND_DEFAULT_IMAGE"
+          fi
+
+          echo "BACKEND_CURRENT_IMAGE=$BACKEND_CURRENT_IMAGE" >> "$GITHUB_ENV"
+          echo "FRONTEND_CURRENT_IMAGE=$FRONTEND_CURRENT_IMAGE" >> "$GITHUB_ENV"
+
+          echo "Resolved backend image:  $BACKEND_CURRENT_IMAGE"
+          echo "Resolved frontend image: $FRONTEND_CURRENT_IMAGE"
+
+      - name: Build and push backend image
+        if: steps.changes.outputs.backend == 'true'
+        run: |
+          set -euo pipefail
+
+          BACKEND_IMAGE="${{ steps.tfout.outputs.backend_ecr_url }}:${GITHUB_SHA}"
+          BACKEND_LATEST="${{ steps.tfout.outputs.backend_ecr_url }}:latest"
+
+          docker build \
+            -t "$BACKEND_IMAGE" \
+            -t "$BACKEND_LATEST" \
+            ./backend
+
+          docker push "$BACKEND_IMAGE"
+          docker push "$BACKEND_LATEST"
+
+          echo "BACKEND_BUILT_IMAGE=$BACKEND_IMAGE" >> "$GITHUB_ENV"
+
+      - name: Build and push frontend image
+        if: steps.changes.outputs.frontend == 'true'
+        run: |
+          set -euo pipefail
+
+          FRONTEND_IMAGE="${{ steps.tfout.outputs.frontend_ecr_url }}:${GITHUB_SHA}"
+          FRONTEND_LATEST="${{ steps.tfout.outputs.frontend_ecr_url }}:latest"
+
+          docker build \
+            -t "$FRONTEND_IMAGE" \
+            -t "$FRONTEND_LATEST" \
+            ./frontend
+
+          docker push "$FRONTEND_IMAGE"
+          docker push "$FRONTEND_LATEST"
+
+          echo "FRONTEND_BUILT_IMAGE=$FRONTEND_IMAGE" >> "$GITHUB_ENV"
+
       - name: Install envsubst
         run: |
           sudo apt-get update -y
           sudo apt-get install -y gettext-base
 
-      - name: Deploy Kubernetes manifests
+      - name: Prepare final image variables
+        run: |
+          set -euo pipefail
+
+          FINAL_BACKEND_IMAGE="${BACKEND_BUILT_IMAGE:-$BACKEND_CURRENT_IMAGE}"
+          FINAL_FRONTEND_IMAGE="${FRONTEND_BUILT_IMAGE:-$FRONTEND_CURRENT_IMAGE}"
+
+          echo "BACKEND_IMAGE=$FINAL_BACKEND_IMAGE" >> "$GITHUB_ENV"
+          echo "FRONTEND_IMAGE=$FINAL_FRONTEND_IMAGE" >> "$GITHUB_ENV"
+
+          echo "Final backend image:  $FINAL_BACKEND_IMAGE"
+          echo "Final frontend image: $FINAL_FRONTEND_IMAGE"
+
+      - name: Deploy backend manifest
+        if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.k8s == 'true'
         run: |
           set -euo pipefail
 
           export K8S_NAMESPACE="${{ vars.K8S_NAMESPACE }}"
           export K8S_SECRET_NAME="${{ vars.K8S_SECRET_NAME }}"
-          export BACKEND_IMAGE="$BACKEND_IMAGE"
-          export FRONTEND_IMAGE="$FRONTEND_IMAGE"
+          export BACKEND_IMAGE="${BACKEND_IMAGE}"
 
           envsubst < k8s/backend-deployment.yaml | kubectl apply -f -
+
+      - name: Deploy frontend manifest
+        if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.k8s == 'true'
+        run: |
+          set -euo pipefail
+
+          export K8S_NAMESPACE="${{ vars.K8S_NAMESPACE }}"
+          export FRONTEND_IMAGE="${FRONTEND_IMAGE}"
+
           envsubst < k8s/frontend-deployment.yaml | kubectl apply -f -
 
-      - name: Force deployment images
+      - name: Wait for backend rollout
+        if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.k8s == 'true'
         run: |
-          set -euo pipefail
-
-          kubectl -n "${{ vars.K8S_NAMESPACE }}" set image deployment/cook-with-me-backend \
-            '*='"$BACKEND_IMAGE"
-
-          kubectl -n "${{ vars.K8S_NAMESPACE }}" set image deployment/cook-with-me-frontend \
-            '*='"$FRONTEND_IMAGE"
-
-      - name: Wait for rollout
-        run: |
-          set -euo pipefail
-
           kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-backend --timeout=300s
-          kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-frontend --timeout=300s
 
-      - name: Print Kubernetes resources
-        if: always()
+      - name: Wait for frontend rollout
+        if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.k8s == 'true'
         run: |
-          kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -o wide || true
-          kubectl -n "${{ vars.K8S_NAMESPACE }}" get svc -o wide || true
-          kubectl -n "${{ vars.K8S_NAMESPACE }}" get deploy -o wide || true
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-frontend --timeout=300s
 
       - name: Print frontend URL
         run: |
           set -euo pipefail
-
-          echo "Waiting for frontend LoadBalancer hostname..."
 
           HOST=""
           for i in {1..30}; do
@@ -244,7 +276,7 @@ jobs:
               break
             fi
 
-            echo "Still waiting... attempt $i/30"
+            echo "Still waiting for frontend LoadBalancer... attempt $i/30"
             sleep 10
           done
 
