@@ -354,3 +354,28 @@ def add_comment(recipe_id):
     recipe["comments"].append(comment)
 
     return jsonify({"data": comment}), 201
+
+@recipes_bp.route("/<recipe_id>", methods=["DELETE"])
+def delete_recipe(recipe_id):
+    if config.USE_DB:
+        session = get_session()
+        try:
+            recipe = session.get(Recipe, int(recipe_id))
+            if recipe is None:
+                return jsonify({"error": "Recipe not found"}), 404
+
+            session.delete(recipe)
+            session.commit()
+            return jsonify({"data": {"deleted": True, "id": str(recipe_id)}})
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    recipe = _find_mock_recipe(recipe_id)
+    if recipe is None:
+        return jsonify({"error": "Recipe not found"}), 404
+
+    _RECIPES.remove(recipe)
+    return jsonify({"data": {"deleted": True, "id": str(recipe_id)}})
