@@ -138,6 +138,7 @@ jobs:
           FRONTEND_LATEST="${{ steps.tfout.outputs.frontend_ecr_url }}:latest"
 
           docker build \
+            --build-arg VITE_API_BASE_URL=/backend \
             -t "$FRONTEND_IMAGE" \
             -t "$FRONTEND_LATEST" \
             ./frontend
