@@ -2,16 +2,6 @@ name: Build Start - Provision and First Deploy
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-      - "ci/**"
-    paths:
-      - "terraform/**"
-      - "backend/**"
-      - "frontend/**"
-      - "k8s/**"
-      - ".github/workflows/build_start.yml"
 
 permissions:
   id-token: write

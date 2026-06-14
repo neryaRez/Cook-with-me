@@ -111,6 +111,10 @@ jobs:
           echo "backend_ecr_url=$BACKEND_ECR_URL" >> "$GITHUB_OUTPUT"
           echo "frontend_ecr_url=$FRONTEND_ECR_URL" >> "$GITHUB_OUTPUT"
 
+          echo "EKS cluster: $EKS_CLUSTER_NAME"
+          echo "Backend ECR: $BACKEND_ECR_URL"
+          echo "Frontend ECR: $FRONTEND_ECR_URL"
+
       - name: Login to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
@@ -205,6 +209,7 @@ jobs:
           FRONTEND_LATEST="${{ steps.tfout.outputs.frontend_ecr_url }}:latest"
 
           docker build \
+            --build-arg VITE_API_BASE_URL=/backend \
             -t "$FRONTEND_IMAGE" \
             -t "$FRONTEND_LATEST" \
             ./frontend
@@ -232,6 +237,17 @@ jobs:
           echo "Final backend image:  $FINAL_BACKEND_IMAGE"
           echo "Final frontend image: $FINAL_FRONTEND_IMAGE"
 
+      - name: Deploy Kubernetes base manifests
+        if: steps.changes.outputs.k8s == 'true'
+        run: |
+          set -euo pipefail
+
+          export K8S_NAMESPACE="${{ vars.K8S_NAMESPACE }}"
+
+          envsubst < k8s/namespace.yaml | kubectl apply -f -
+          envsubst < k8s/backend-service.yaml | kubectl apply -f -
+          envsubst < k8s/frontend-service.yaml | kubectl apply -f -
+
       - name: Deploy backend manifest
         if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.k8s == 'true'
         run: |
@@ -256,12 +272,61 @@ jobs:
       - name: Wait for backend rollout
         if: steps.changes.outputs.backend == 'true' || steps.changes.outputs.k8s == 'true'
         run: |
+          set -euo pipefail
           kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-backend --timeout=300s
 
       - name: Wait for frontend rollout
         if: steps.changes.outputs.frontend == 'true' || steps.changes.outputs.k8s == 'true'
         run: |
+          set -euo pipefail
           kubectl -n "${{ vars.K8S_NAMESPACE }}" rollout status deployment/cook-with-me-frontend --timeout=300s
+
+      - name: Debug Kubernetes failure
+        if: failure()
+        run: |
+          set +e
+
+          echo "=== Kubernetes resources ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get all -o wide
+
+          echo
+          echo "=== Pods ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -o wide
+
+          echo
+          echo "=== Backend logs ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" logs deployment/cook-with-me-backend --all-containers=true --tail=150
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" logs deployment/cook-with-me-backend --all-containers=true --tail=150 --previous || true
+
+          echo
+          echo "=== Frontend logs ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" logs deployment/cook-with-me-frontend --all-containers=true --tail=150
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" logs deployment/cook-with-me-frontend --all-containers=true --tail=150 --previous || true
+
+          echo
+          echo "=== Describe backend pods ==="
+          for pod in $(kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -l app=cook-with-me-backend -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- $pod ---"
+            kubectl -n "${{ vars.K8S_NAMESPACE }}" describe pod "$pod"
+          done
+
+          echo
+          echo "=== Describe frontend pods ==="
+          for pod in $(kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -l app=cook-with-me-frontend -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- $pod ---"
+            kubectl -n "${{ vars.K8S_NAMESPACE }}" describe pod "$pod"
+          done
+
+          echo
+          echo "=== Recent namespace events ==="
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get events --sort-by='.lastTimestamp' | tail -80
+
+      - name: Print Kubernetes resources
+        if: always()
+        run: |
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get pods -o wide || true
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get svc -o wide || true
+          kubectl -n "${{ vars.K8S_NAMESPACE }}" get deploy -o wide || true
 
       - name: Print frontend URL
         run: |
