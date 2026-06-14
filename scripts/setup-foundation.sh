@@ -14,9 +14,9 @@ ENV_FILE="${ENV_FILE:-backend/.env.local}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-TF_BOOTSTRAP_DIR="$ROOT_DIR/terraform/bootstrap"
-BOOTSTRAP_BACKEND_FILE="$TF_BOOTSTRAP_DIR/backend.tf"
-BOOTSTRAP_TFVARS_FILE="$TF_BOOTSTRAP_DIR/terraform.tfvars"
+TF_FOUNDATION_DIR="$ROOT_DIR/terraform/foundation"
+FOUNDATION_BACKEND_FILE="$TF_FOUNDATION_DIR/backend.tf"
+FOUNDATION_TFVARS_FILE="$TF_FOUNDATION_DIR/terraform.tfvars"
 
 APT_UPDATED="false"
 
@@ -265,7 +265,7 @@ prepare_terraform_backend_bucket() {
 
   TF_STATE_BUCKET="${project_clean}-${env_clean}-tfstate-${ACCOUNT_ID}-${AWS_REGION}"
   TF_STATE_KEY="tfstate/${project_clean}/${env_clean}/terraform.tfstate"
-  TF_BOOTSTRAP_STATE_KEY="tfstate/${project_clean}/${env_clean}/bootstrap.tfstate"
+  TF_FOUNDATION_STATE_KEY="tfstate/${project_clean}/${env_clean}/bootstrap.tfstate"
 
   if ! aws s3api head-bucket --bucket "$TF_STATE_BUCKET" 2>/dev/null; then
     info "Creating tfstate bucket: $TF_STATE_BUCKET"
@@ -302,7 +302,7 @@ prepare_terraform_backend_bucket() {
 write_bootstrap_terraform_files() {
   section "Generating bootstrap Terraform files"
 
-  mkdir -p "$TF_BOOTSTRAP_DIR"
+  mkdir -p "$TF_FOUNDATION_DIR"
 
   GITHUB_OWNER="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f1)"
   GITHUB_REPO="$(echo "$GITHUB_REPOSITORY" | cut -d/ -f2)"
@@ -314,15 +314,15 @@ write_bootstrap_terraform_files() {
     info "$GITHUB_OIDC_PROVIDER_ARN"
     github_oidc_value="\"$GITHUB_OIDC_PROVIDER_ARN\""
   else
-    info "No existing GitHub OIDC provider detected. terraform/bootstrap will create one."
+    info "No existing GitHub OIDC provider detected. terraform/foundation will create one."
     github_oidc_value="null"
   fi
 
-  cat > "$BOOTSTRAP_BACKEND_FILE" <<TF
+  cat > "$FOUNDATION_BACKEND_FILE" <<TF
 terraform {
   backend "s3" {
     bucket       = "$TF_STATE_BUCKET"
-    key          = "$TF_BOOTSTRAP_STATE_KEY"
+    key          = "$TF_FOUNDATION_STATE_KEY"
     region       = "$AWS_REGION"
     encrypt      = true
     use_lockfile = true
@@ -330,7 +330,7 @@ terraform {
 }
 TF
 
-  cat > "$BOOTSTRAP_TFVARS_FILE" <<TFVARS
+  cat > "$FOUNDATION_TFVARS_FILE" <<TFVARS
 project_name  = "$PROJECT_NAME"
 env_name      = "$ENV_NAME"
 aws_region    = "$AWS_REGION"
@@ -346,32 +346,32 @@ TFVARS
 }
 
 run_bootstrap_terraform() {
-  section "Applying terraform/bootstrap"
+  section "Applying terraform/foundation"
 
-  [ -f "$TF_BOOTSTRAP_DIR/main.tf" ] || fail "Missing $TF_BOOTSTRAP_DIR/main.tf"
-  [ -f "$TF_BOOTSTRAP_DIR/variables.tf" ] || fail "Missing $TF_BOOTSTRAP_DIR/variables.tf"
-  [ -f "$TF_BOOTSTRAP_DIR/outputs.tf" ] || fail "Missing $TF_BOOTSTRAP_DIR/outputs.tf"
+  [ -f "$TF_FOUNDATION_DIR/main.tf" ] || fail "Missing $TF_FOUNDATION_DIR/main.tf"
+  [ -f "$TF_FOUNDATION_DIR/variables.tf" ] || fail "Missing $TF_FOUNDATION_DIR/variables.tf"
+  [ -f "$TF_FOUNDATION_DIR/outputs.tf" ] || fail "Missing $TF_FOUNDATION_DIR/outputs.tf"
 
-  terraform -chdir="$TF_BOOTSTRAP_DIR" init -reconfigure
-  terraform -chdir="$TF_BOOTSTRAP_DIR" fmt -recursive
-  terraform -chdir="$TF_BOOTSTRAP_DIR" validate
+  terraform -chdir="$TF_FOUNDATION_DIR" init -reconfigure
+  terraform -chdir="$TF_FOUNDATION_DIR" fmt -recursive
+  terraform -chdir="$TF_FOUNDATION_DIR" validate
 
   if [ "$AUTO_APPROVE" = "true" ]; then
-    terraform -chdir="$TF_BOOTSTRAP_DIR" apply -auto-approve
+    terraform -chdir="$TF_FOUNDATION_DIR" apply -auto-approve
   else
-    terraform -chdir="$TF_BOOTSTRAP_DIR" plan -out=tfplan
-    terraform -chdir="$TF_BOOTSTRAP_DIR" apply tfplan
+    terraform -chdir="$TF_FOUNDATION_DIR" plan -out=tfplan
+    terraform -chdir="$TF_FOUNDATION_DIR" apply tfplan
   fi
 
   AWS_INFRA_ROLE_ARN="$(
-    terraform -chdir="$TF_BOOTSTRAP_DIR" output -raw github_actions_infra_role_arn
+    terraform -chdir="$TF_FOUNDATION_DIR" output -raw github_actions_infra_role_arn
   )"
 
   GITHUB_OIDC_PROVIDER_ARN="$(
-    terraform -chdir="$TF_BOOTSTRAP_DIR" output -raw github_oidc_provider_arn
+    terraform -chdir="$TF_FOUNDATION_DIR" output -raw github_oidc_provider_arn
   )"
 
-  ok "terraform/bootstrap applied"
+  ok "terraform/foundation applied"
   info "GitHub Actions infra role: $AWS_INFRA_ROLE_ARN"
 }
 
@@ -411,7 +411,7 @@ upload_github_variables() {
 
   set_github_variable "TF_STATE_BUCKET" "$TF_STATE_BUCKET"
   set_github_variable "TF_STATE_KEY" "$TF_STATE_KEY"
-  set_github_variable "TF_BOOTSTRAP_STATE_KEY" "$TF_BOOTSTRAP_STATE_KEY"
+  set_github_variable "TF_FOUNDATION_STATE_KEY" "$TF_FOUNDATION_STATE_KEY"
 
   set_github_variable "PROJECT_NAME" "$PROJECT_NAME"
   set_github_variable "ENV_NAME" "$ENV_NAME"
@@ -436,7 +436,7 @@ print_summary() {
   echo "Terraform Backend:"
   echo "  S3 Bucket:          $TF_STATE_BUCKET"
   echo "  App State Key:      $TF_STATE_KEY"
-  echo "  Bootstrap State Key:$TF_BOOTSTRAP_STATE_KEY"
+  echo "  Bootstrap State Key:$TF_FOUNDATION_STATE_KEY"
   echo "  S3 Lockfile:        enabled"
   echo
   echo "Secrets:"

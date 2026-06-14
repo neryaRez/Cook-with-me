@@ -11,6 +11,10 @@ from datetime import date
 
 from flask import Blueprint, jsonify, request
 
+from .. import config
+from ..db import get_session
+from ..models import Recipe
+
 recipes_bp = Blueprint("recipes", __name__, url_prefix="/api/recipes")
 
 _RECIPES = [
@@ -178,23 +182,64 @@ _RECIPES = [
     },
 ]
 
+def _serialize_recipe(recipe):
+    return {
+        "id": str(recipe.id),
+        "title": recipe.title,
+        "description": recipe.description,
+        "image": recipe.image,
+        "category": recipe.category,
+        "cuisine": recipe.cuisine,
+        "difficulty": recipe.difficulty,
+        "prepTime": recipe.prep_time,
+        "cookTime": recipe.cook_time,
+        "servings": recipe.servings,
+        "rating": recipe.rating,
+        "author": {
+            "name": recipe.author_name,
+            "avatar": recipe.author_avatar,
+        },
+        "tags": recipe.tags or [],
+        "ingredients": recipe.ingredients or [],
+        "steps": recipe.steps or [],
+        "comments": recipe.comments or [],
+    }
 
-def _find_recipe(recipe_id):
+
+def _find_mock_recipe(recipe_id):
     return next((recipe for recipe in _RECIPES if recipe["id"] == str(recipe_id)), None)
 
 
-def _next_id():
+def _next_mock_id():
     return str(max((int(recipe["id"]) for recipe in _RECIPES), default=0) + 1)
 
 
 @recipes_bp.route("", methods=["GET"])
 def list_recipes():
+    if config.USE_DB:
+        session = get_session()
+        try:
+            recipes = session.query(Recipe).order_by(Recipe.id.desc()).all()
+            return jsonify({"data": [_serialize_recipe(recipe) for recipe in recipes]})
+        finally:
+            session.close()
+
     return jsonify({"data": _RECIPES})
 
 
 @recipes_bp.route("/<recipe_id>", methods=["GET"])
 def get_recipe(recipe_id):
-    recipe = _find_recipe(recipe_id)
+    if config.USE_DB:
+        session = get_session()
+        try:
+            recipe = session.get(Recipe, int(recipe_id))
+            if recipe is None:
+                return jsonify({"error": "Recipe not found"}), 404
+            return jsonify({"data": _serialize_recipe(recipe)})
+        finally:
+            session.close()
+
+    recipe = _find_mock_recipe(recipe_id)
     if recipe is None:
         return jsonify({"error": "Recipe not found"}), 404
     return jsonify({"data": recipe})
@@ -207,8 +252,43 @@ def create_recipe():
     if not payload.get("title") or not payload.get("description"):
         return jsonify({"error": "title and description are required"}), 400
 
+    if config.USE_DB:
+        session = get_session()
+        try:
+            author = payload.get("author") or {}
+
+            recipe = Recipe(
+                title=payload["title"],
+                description=payload["description"],
+                image=payload.get("image", ""),
+                category=payload.get("category", "Quick Meals"),
+                cuisine=payload.get("cuisine", "Fusion"),
+                difficulty=payload.get("difficulty", "Easy"),
+                prep_time=payload.get("prepTime", 0),
+                cook_time=payload.get("cookTime", 0),
+                servings=payload.get("servings", 1),
+                rating=0,
+                author_name=author.get("name", "Guest Chef"),
+                author_avatar=author.get("avatar", "https://i.pravatar.cc/100?img=1"),
+                tags=payload.get("tags", []),
+                ingredients=payload.get("ingredients", []),
+                steps=payload.get("steps", []),
+                comments=[],
+            )
+
+            session.add(recipe)
+            session.commit()
+            session.refresh(recipe)
+
+            return jsonify({"data": _serialize_recipe(recipe)}), 201
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
     recipe = {
-        "id": _next_id(),
+        "id": _next_mock_id(),
         "title": payload["title"],
         "description": payload["description"],
         "image": payload.get("image", ""),
@@ -225,26 +305,77 @@ def create_recipe():
         "steps": payload.get("steps", []),
         "comments": [],
     }
+
     _RECIPES.append(recipe)
     return jsonify({"data": recipe}), 201
 
 
 @recipes_bp.route("/<recipe_id>/comments", methods=["POST"])
 def add_comment(recipe_id):
-    recipe = _find_recipe(recipe_id)
-    if recipe is None:
-        return jsonify({"error": "Recipe not found"}), 404
-
     payload = request.get_json(silent=True) or {}
     text = (payload.get("text") or "").strip()
+
     if not text:
         return jsonify({"error": "text is required"}), 400
 
     comment = {
-        "id": f"c{len(recipe['comments']) + 1}",
+        "id": f"c{date.today().isoformat()}-{recipe_id}",
         "author": payload.get("author", "Guest"),
         "text": text,
         "date": date.today().isoformat(),
     }
+
+    if config.USE_DB:
+        session = get_session()
+        try:
+            recipe = session.get(Recipe, int(recipe_id))
+            if recipe is None:
+                return jsonify({"error": "Recipe not found"}), 404
+
+            comments = list(recipe.comments or [])
+            comment["id"] = f"c{len(comments) + 1}"
+            comments.append(comment)
+
+            recipe.comments = comments
+            session.commit()
+
+            return jsonify({"data": comment}), 201
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    recipe = _find_mock_recipe(recipe_id)
+    if recipe is None:
+        return jsonify({"error": "Recipe not found"}), 404
+
+    comment["id"] = f"c{len(recipe['comments']) + 1}"
     recipe["comments"].append(comment)
+
     return jsonify({"data": comment}), 201
+
+@recipes_bp.route("/<recipe_id>", methods=["DELETE"])
+def delete_recipe(recipe_id):
+    if config.USE_DB:
+        session = get_session()
+        try:
+            recipe = session.get(Recipe, int(recipe_id))
+            if recipe is None:
+                return jsonify({"error": "Recipe not found"}), 404
+
+            session.delete(recipe)
+            session.commit()
+            return jsonify({"data": {"deleted": True, "id": str(recipe_id)}})
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    recipe = _find_mock_recipe(recipe_id)
+    if recipe is None:
+        return jsonify({"error": "Recipe not found"}), 404
+
+    _RECIPES.remove(recipe)
+    return jsonify({"data": {"deleted": True, "id": str(recipe_id)}})

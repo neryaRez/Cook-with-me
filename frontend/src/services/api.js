@@ -34,7 +34,8 @@ async function request(path, options = {}) {
     throw new Error(`Request failed: ${response.status} ${response.statusText}`)
   }
 
-  return response.json()
+  const json = await response.json()
+  return json.data ?? json
 }
 
 /**
@@ -133,10 +134,15 @@ export async function createComment(recipeId, data) {
  */
 export async function askRoboChef(data) {
   if (API_BASE_URL) {
-    return request('/api/ai/ask', {
+    const result = await request('/api/ai/ask', {
       method: 'POST',
       body: JSON.stringify(data),
     })
+
+    return {
+      id: generateId(),
+      reply: result.answer ?? result.reply ?? 'Robo Chef did not return an answer.',
+    }
   }
 
   await delay(MOCK_DELAY_MS)

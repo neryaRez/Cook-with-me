@@ -89,7 +89,7 @@ crash.log
 terraform/environments/*/backend.tf
 terraform/environments/*/terraform.tfvars
 terraform/environments/*/terraform.tfvars.json
-terraform/bootstrap/backend.tf
-terraform/bootstrap/terraform.tfvars
-terraform/bootstrap/terraform.tfvars.json
+terraform/foundation/backend.tf
+terraform/foundation/terraform.tfvars
+terraform/foundation/terraform.tfvars.json
 output.txt

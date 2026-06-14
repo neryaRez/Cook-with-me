@@ -34,5 +34,5 @@ variable "github_branch" {
 
 variable "github_actions_infra_role_arn" {
   type        = string
-  description = "GitHub Actions infra role ARN created by terraform/bootstrap"
+  description = "GitHub Actions infra role ARN created by terraform/foundation"
 }
